@@ -9,6 +9,12 @@ import { ViewerController } from './viewer/viewer.controller';
 import { ViewerService } from './viewer/viewer.service';
 import { HealthController } from './health.controller';
 import { SiteController } from './site/site.controller';
+import { ViewersController } from './viewers/viewers.controller';
+import { ViewersService } from './viewers/viewers.service';
+import { CommerceController } from './commerce/commerce.controller';
+import { CommerceService } from './commerce/commerce.service';
+import { EngagementController } from './engagement/engagement.controller';
+import { EngagementService } from './engagement/engagement.service';
 
 @Module({
   imports: [CoreModule, MediaModule],
@@ -16,12 +22,18 @@ import { SiteController } from './site/site.controller';
     CatalogController,
     ViewerController,
     SiteController,
+    ViewersController,
+    CommerceController,
+    EngagementController,
     HealthController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: TokenGuard },
     CatalogService,
     ViewerService,
+    ViewersService,
+    CommerceService,
+    EngagementService,
   ],
 })
 export class AppModule {}

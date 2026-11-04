@@ -164,3 +164,155 @@ model AppSetting {
 
   @@map("app_settings")
 }
+
+// ---------- Viewer accounts (V19; created and checked by movie-api) ----------
+
+/// A RuengFlix viewer: Cambodian phone number (E.164) and a scrypt password hash
+model Viewer {
+  id             BigInt         @id @default(autoincrement())
+  /// E.164; null for accounts made with Telegram or Google (V20)
+  phone          String?        @unique
+  displayName    String         @map("display_name")
+  passwordHash   String?        @map("password_hash")
+  /// Telegram user id, which is also the bot's chat id for this viewer
+  telegramId       BigInt?      @unique @map("telegram_id")
+  telegramUsername String?      @map("telegram_username")
+  /// Google's "sub" claim
+  googleSub        String?      @unique @map("google_sub")
+  googleEmail      String?      @map("google_email")
+  photoUrl         String?      @map("photo_url")
+  disabled       Boolean        @default(false)
+  sessionVersion Int            @default(0) @map("session_version")
+  createdAt      DateTime       @map("created_at") @db.Timestamp(6)
+  lastLoginAt    DateTime?      @map("last_login_at") @db.Timestamp(6)
+  library        ViewerLibrary?
+
+  @@map("streaming_viewers")
+}
+
+/// The viewer's library as RuengFlix keeps it, one JSON document
+model ViewerLibrary {
+  viewerId  BigInt   @id @map("viewer_id")
+  dataJson  String   @map("data_json")
+  updatedAt DateTime @map("updated_at") @db.Timestamp(6)
+  viewer    Viewer   @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@map("streaming_viewer_libraries")
+}
+
+// ---------- Payments, coins, comments, push, activity (VideoLingo's V21 migration) ----------
+
+model Wallet {
+  viewerId  BigInt    @id @map("viewer_id")
+  coins     Int       @default(0)
+  vipUntil  DateTime? @map("vip_until") @db.Timestamp(6)
+  updatedAt DateTime  @map("updated_at") @db.Timestamp(6)
+
+  @@map("streaming_wallets")
+}
+
+model CoinLedger {
+  id        BigInt   @id @default(autoincrement())
+  viewerId  BigInt   @map("viewer_id")
+  delta     Int
+  reason    String
+  ref       String?
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+
+  @@map("streaming_coin_ledger")
+}
+
+model Order {
+  id           BigInt    @id @default(autoincrement())
+  viewerId     BigInt?   @map("viewer_id")
+  kind         String
+  amountUsd    Decimal   @map("amount_usd") @db.Decimal(10, 2)
+  coins        Int?
+  collectionId BigInt?   @map("collection_id")
+  months       Int?
+  status       String
+  billNumber   String    @unique @map("bill_number")
+  khqr         String
+  khqrMd5      String    @map("khqr_md5")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamp(6)
+  createdAt    DateTime  @map("created_at") @db.Timestamp(6)
+  paidAt       DateTime? @map("paid_at") @db.Timestamp(6)
+  paidBy       String?   @map("paid_by")
+  bakongHash   String?   @map("bakong_hash")
+  note         String?
+
+  @@map("streaming_orders")
+}
+
+model Entitlement {
+  viewerId     BigInt   @map("viewer_id")
+  collectionId BigInt   @map("collection_id")
+  /// 0 = the whole series
+  episode      Int
+  source       String
+  orderId      BigInt?  @map("order_id")
+  createdAt    DateTime @map("created_at") @db.Timestamp(6)
+
+  @@id([viewerId, collectionId, episode])
+  @@map("streaming_entitlements")
+}
+
+model CheckIn {
+  viewerId BigInt   @map("viewer_id")
+  day      DateTime @db.Date
+  coins    Int
+  streak   Int
+
+  @@id([viewerId, day])
+  @@map("streaming_check_ins")
+}
+
+model Comment {
+  id           BigInt    @id @default(autoincrement())
+  collectionId BigInt    @map("collection_id")
+  episode      Int
+  viewerId     BigInt    @map("viewer_id")
+  body         String
+  createdAt    DateTime  @map("created_at") @db.Timestamp(6)
+  reportCount  Int       @default(0) @map("report_count")
+  hiddenAt     DateTime? @map("hidden_at") @db.Timestamp(6)
+  hiddenBy     String?   @map("hidden_by")
+
+  @@map("streaming_comments")
+}
+
+model CommentReport {
+  commentId BigInt   @map("comment_id")
+  viewerId  BigInt   @map("viewer_id")
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+
+  @@id([commentId, viewerId])
+  @@map("streaming_comment_reports")
+}
+
+model PushSubscription {
+  id        BigInt   @id @default(autoincrement())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  viewerId  BigInt?  @map("viewer_id")
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+
+  @@map("streaming_push_subscriptions")
+}
+
+model PushFollow {
+  subscriptionId BigInt @map("subscription_id")
+  collectionId   BigInt @map("collection_id")
+
+  @@id([subscriptionId, collectionId])
+  @@map("streaming_push_follows")
+}
+
+model ViewerDay {
+  viewerId BigInt   @map("viewer_id")
+  day      DateTime @db.Date
+
+  @@id([viewerId, day])
+  @@map("streaming_viewer_days")
+}

@@ -7,6 +7,12 @@ export interface Prices {
   seriesUnlock: number;
   /** Months → price of a VIP plan */
   vipPlans: { months: 1 | 3 | 6 | 12; price: number }[];
+  /** Coin packs viewers can buy with KHQR */
+  coinPacks: { coins: 100 | 300 | 1000; price: number }[];
+  /** Coins to unlock one VIP episode */
+  episodeCoins: number;
+  /** Coins for the daily check-in (day 7 of a streak pays double) */
+  checkInCoins: number;
 }
 
 export const DEFAULT_PRICES: Prices = {
@@ -17,6 +23,26 @@ export const DEFAULT_PRICES: Prices = {
     { months: 6, price: 8.99 },
     { months: 12, price: 14.99 },
   ],
+  coinPacks: [
+    { coins: 100, price: 0.99 },
+    { coins: 300, price: 2.49 },
+    { coins: 1000, price: 6.99 },
+  ],
+  episodeCoins: 20,
+  checkInCoins: 5,
+};
+
+const PACK_FIELDS = {
+  100: 'coinPack100',
+  300: 'coinPack300',
+  1000: 'coinPack1000',
+} as const;
+
+const whole = (value: unknown, fallback: number, max: number) => {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= max
+    ? n
+    : fallback;
 };
 
 const FIELDS = {
@@ -49,5 +75,22 @@ export function pricesFrom(valueJson: string | null | undefined): Prices {
       months: p.months,
       price: price(stored[FIELDS[p.months]], p.price),
     })),
+    coinPacks: DEFAULT_PRICES.coinPacks.map((p) => ({
+      coins: p.coins,
+      // A pack must cost something: a stored 0 would hand out free coins
+      price:
+        price(stored[PACK_FIELDS[p.coins]], p.price) ||
+        DEFAULT_PRICES.coinPacks.find((d) => d.coins === p.coins)!.price,
+    })),
+    episodeCoins: whole(
+      stored.episodeUnlockCoins,
+      DEFAULT_PRICES.episodeCoins,
+      10_000,
+    ),
+    checkInCoins: whole(
+      stored.dailyCheckInCoins,
+      DEFAULT_PRICES.checkInCoins,
+      1_000,
+    ),
   };
 }

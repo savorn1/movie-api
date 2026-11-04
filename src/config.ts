@@ -7,6 +7,20 @@ export interface AppConfig {
   /** Time zone of VideoLingo's `timestamp` columns (its server's zone) */
   dbTimeZone: string;
   media: MediaConfig;
+  payments: PaymentsConfig;
+}
+
+/** KHQR payments. Off until KHQR_ACCOUNT_ID is set; confirmed automatically only with BAKONG_TOKEN. */
+export interface PaymentsConfig {
+  /** Bakong account that receives payments, e.g. "ruengflix@aclb" */
+  accountId: string;
+  merchantName: string;
+  merchantCity: string;
+  /** Bakong Open API token (api-bakong.nbc.gov.kh); empty = an admin marks orders paid */
+  bakongToken: string;
+  bakongApiUrl: string;
+  /** How long a KHQR can be paid */
+  qrMinutes: number;
 }
 
 export interface MediaConfig {
@@ -54,6 +68,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       publicEndpoint: env.S3_PUBLIC_ENDPOINT || endpoint,
       signedUrls: env.MEDIA_SIGNED_URLS !== 'false',
       ttlMinutes: Math.max(5, Number(env.MEDIA_URL_TTL_MINUTES) || 180),
+    },
+    payments: {
+      accountId: env.KHQR_ACCOUNT_ID ?? '',
+      merchantName: env.KHQR_MERCHANT_NAME || 'RuengFlix',
+      merchantCity: env.KHQR_MERCHANT_CITY || 'Phnom Penh',
+      bakongToken: env.BAKONG_TOKEN ?? '',
+      bakongApiUrl: (
+        env.BAKONG_API_URL || 'https://api-bakong.nbc.gov.kh'
+      ).replace(/\/+$/, ''),
+      qrMinutes: Math.min(60, Math.max(3, Number(env.KHQR_MINUTES) || 15)),
     },
   };
 }

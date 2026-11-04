@@ -26,4 +26,18 @@ describe('pricesFrom', () => {
     ).toBe(0.49);
     expect(pricesFrom('{not json')).toEqual(DEFAULT_PRICES);
   });
+
+  it('reads coin settings, ignoring free packs and bad numbers', () => {
+    const p = pricesFrom(
+      JSON.stringify({
+        coinPack100: 1.25,
+        coinPack300: 0,
+        episodeUnlockCoins: 30,
+        dailyCheckInCoins: 2.5,
+      }),
+    );
+    expect(p.coinPacks.map((x) => x.price)).toEqual([1.25, 2.49, 6.99]);
+    expect(p.episodeCoins).toBe(30);
+    expect(p.checkInCoins).toBe(5);
+  });
 });

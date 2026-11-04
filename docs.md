@@ -36,6 +36,7 @@ This page explains how they fit together. For movie-api's routes, see [README.md
 | `streaming_episode_stats`, `streaming_reports`, `streaming_follows`, `streaming_alert_marks` | Created by VideoLingo's `V17__streaming_viewer_data.sql` | movie-api writes them; the admin portal's RuengFlix pages read them and make a few admin changes (see below) |
 | `streaming_alert_log`, `collections.featured_rank` | Created by VideoLingo's `V18__streaming_admin.sql` | movie-api writes the alert log and reads the hero order |
 | `app_settings` row `streaming` (prices) | VideoLingo (`Settings.Streaming`) | Read only (`GET /site`) |
+| `streaming_viewers`, `streaming_viewer_libraries` | Created by VideoLingo's `V19__streaming_viewers.sql` | movie-api creates accounts, checks passwords and stores libraries; the admin portal lists and disables accounts |
 | Uploaded files (videos, thumbnails, artwork, audio) | VideoLingo uploads them to the bucket | movie-api only signs download links. It never uploads or deletes. |
 | Redis | VideoLingo | Not used |
 | Admin portal frontend | videolingo-web | None. It talks only to VideoLingo, never to movie-api. |
@@ -47,6 +48,8 @@ The RuengFlix migrations in VideoLingo are:
 
 - `V16__streaming_series.sql` adds the series settings to `collections` (`streaming`, `series_category`, `series_status`, `vip`, `free_episodes`, `recap_seconds`, `search_keywords`, `region`, `release_year`, `genres`, `banner_url`, `vertical_url`).
 - `V17__streaming_viewer_data.sql` creates the four `streaming_*` tables. Rows are deleted along with their collection.
+- `V19__streaming_viewers.sql` creates viewer accounts and their synced libraries.
+- `V20__viewer_sign_in_methods.sql` lets accounts sign in with Telegram or Google (`telegram_id`, `google_sub` and profile columns; phone and password become optional).
 - `V18__streaming_admin.sql` adds `collections.featured_rank` (the home hero order) and the `streaming_alert_log` table (every alert sent, for the admin portal's history).
 
 **To add a series setting**, for example a new `collections` column:
@@ -98,7 +101,7 @@ MEDIA_URL_TTL_MINUTES=180
 Start them in this order:
 
 1. Postgres and MinIO.
-2. VideoLingo (`./mvnw spring-boot:run`). On startup it applies its migrations; movie-api needs at least V18.
+2. VideoLingo (`./mvnw spring-boot:run`). On startup it applies its migrations; movie-api needs at least V19.
 3. videolingo-web (`npm run dev`, with `NUXT_BACKEND_BASE=http://localhost:8080`). You only need it to edit content.
 4. movie-api (`npm run start:dev`). Check `GET http://localhost:3020/health`, which needs no token.
 5. movie-frontend (`npm run dev`, http://localhost:3010) with this in its `.env`:
@@ -160,6 +163,34 @@ The collection form also gained **Upload** buttons for the cover, banner and ver
 - warnings: no category, cover or vertical image; a hero pick without a banner; episodes without published Khmer or default subtitles; videos the site skips; VIP with every episode free.
 
 **Not built yet: payments.** Unlocks still live only in the viewer's browser and KHQR isn't connected. Real unlocks need viewer accounts, a payment provider, an unlocks table, and movie-api checking unlocks before returning VIP links.
+
+## Viewer accounts
+
+Viewers can create an account on RuengFlix with a **Cambodian phone number and a password** (`/register`, `/login`, or the account section on the Me page).
+
+- **Where it's stored:** VideoLingo's database (V19). movie-api normalizes the number to E.164 (`012 345 678` → `+85512345678`) and hashes the password with scrypt (Node's built-in). The number isn't verified by SMS yet.
+- **Sessions:** RuengFlix keeps the viewer's id in an encrypted, HTTP-only cookie (`rf_viewer`, 60 days). It needs `NUXT_SESSION_SECRET` (32+ characters) and movie-api; without either, the account links stay hidden. Each session remembers the account's `session_version`, so raising the version signs the viewer out everywhere.
+- **What syncs:** saved and followed series, watch history with resume positions, unlocked series, votes, "seen" episode counts and recent searches. Player settings stay per device. On sign-in, the device's library and the account's are merged once; after that, changes are saved about two seconds after they happen. Signing out clears the device's copy; it stays in the account.
+- **Password change:** keeps this device signed in and signs out every other device.
+- **Telegram and Google (V20):** viewers can also sign in with Telegram or Google, or add either to an account they already have (Me page). An account needs at least one way in: phone + password, Telegram or Google (a database check enforces it).
+  - **Who checks the sign-in:** RuengFlix's server, then it calls `POST /viewers/identity`. For Telegram, RuengFlix checks the Login Widget's HMAC with the bot token and rejects data older than an hour. For Google, it runs the authorization-code flow with state and PKCE, and checks the ID token's issuer, audience and expiry.
+  - **What movie-api does:** finds the viewer by Telegram id or Google `sub`, or creates one. With `linkTo`, it adds the account to that viewer instead (409 `IDENTITY_TAKEN` if another viewer has it).
+  - **Telegram alerts:** a viewer's Telegram id is also their chat with the bot. Following a series on the site then turns on alerts directly (RuengFlix `/api/follows`), with no `/start` deep link.
+- **Admin portal:** RuengFlix › **Viewers** lists accounts with their ways in (search by name, phone, Telegram username or Google email; filter active or disabled). **Disable** signs the viewer out everywhere and blocks sign-in until they're enabled again.
+- **Rate limits (RuengFlix, per IP):** 10 sign-ins per 15 minutes, 5 registrations per hour, 10 password changes per 15 minutes.
+
+movie-api routes, called only by RuengFlix's server:
+
+| Route | |
+|---|---|
+| `POST /viewers` | Register `{ phone, password, displayName }`; 409 `PHONE_TAKEN`, 400 `PHONE_INVALID` |
+| `POST /viewers/login` | `{ phone, password }`; 401 `WRONG_LOGIN`, 403 `DISABLED` |
+| `POST /viewers/identity` | A Telegram or Google account RuengFlix verified: `{ provider, subject, displayName, username?, email?, photoUrl?, linkTo? }`. Signs in, creates, or links. 409 `IDENTITY_TAKEN`, 403 `DISABLED` |
+| `GET /viewers/:id` | The account, including `sessionVersion` and `disabled` |
+| `PUT /viewers/:id/password` | `{ current, next }`; raises `sessionVersion`; 400 `NO_PASSWORD` for Telegram or Google accounts |
+| `GET` / `PUT /viewers/:id/library` | The synced library, `{ data }`, at most 256 KB |
+
+Not built yet: SMS verification, "forgot password", and payments tied to accounts (unlocks sync, but nothing can be bought yet).
 
 ## Media links
 

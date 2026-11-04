@@ -6,6 +6,7 @@ import {
   episodes,
   isLocked,
   isReleased,
+  isUpcoming,
   latestEpisodeAt,
   nextEpisodeAt,
   splitGenres,
@@ -45,7 +46,10 @@ export interface EpisodeView {
   title: string;
   durationSeconds: number | null;
   thumbnailUrl: string | null;
+  /** This viewer can't watch it (a VIP episode they haven't paid for) */
   locked: boolean;
+  /** A VIP episode (after the free ones), whether or not this viewer has paid for it */
+  premium: boolean;
   /** Null when locked */
   videoUrl: string | null;
   /** Path on movie-api; null when locked or without published subtitles */
@@ -139,20 +143,92 @@ export class CatalogService {
       );
   }
 
-  /** One series and its episodes; 404 unless it is listed and has a released episode */
-  async get(id: number): Promise<SeriesDetail> {
+  /**
+   * One series and its episodes; 404 unless it is listed and has a released episode. With `viewerId`,
+   * VIP episodes that viewer has paid for (VIP time, the series, or the episode) come with links.
+   */
+  async get(id: number, viewerId?: number): Promise<SeriesDetail> {
     const c = await this.listed(id);
     const series = await this.summarize(c, new Date());
     if (series.episodes === 0) throw notFound();
+    const access = await this.access(viewerId, c.id);
     const eps = episodes(c.items);
-    const open = eps.filter((e) => !isLocked(c, e.number));
+    const open = eps.filter((e) => !closed(c, e.number, access));
     const tracks = await this.tracksFor(open.map((e) => e.video.id));
     return {
       series,
       episodes: await Promise.all(
-        eps.map((e) => this.toView(c, e, tracks.has(e.video.id))),
+        eps.map((e) => this.toView(c, e, tracks.has(e.video.id), access)),
       ),
     };
+  }
+
+  /** What a viewer has paid for in one series; null for nobody */
+  async access(
+    viewerId: number | undefined,
+    seriesId: bigint,
+  ): Promise<Access | null> {
+    if (!viewerId) return null;
+    const [wallet, rows] = await Promise.all([
+      this.prisma.wallet.findUnique({
+        where: { viewerId: BigInt(viewerId) },
+        select: { vipUntil: true },
+      }),
+      this.prisma.entitlement.findMany({
+        where: { viewerId: BigInt(viewerId), collectionId: seriesId },
+        select: { episode: true },
+      }),
+    ]);
+    const vipUntil = this.time.toInstant(wallet?.vipUntil ?? null);
+    return {
+      vip: !!vipUntil && vipUntil > new Date(),
+      series: rows.some((r) => r.episode === 0),
+      episodes: new Set(rows.map((r) => r.episode).filter((n) => n > 0)),
+    };
+  }
+
+  /**
+   * Episodes scheduled to come out in the next `days` days, soonest first, for the release schedule.
+   * An episode's number is where it will land once the scheduled ones before it are out.
+   */
+  async schedule(days: number) {
+    const collections = await this.prisma.collection.findMany({
+      where: LISTED,
+      include: WITH_ITEMS,
+    });
+    const now = new Date();
+    const until = now.getTime() + days * 86_400_000;
+    const out: {
+      seriesId: number;
+      title: string;
+      posterUrl: string | null;
+      verticalUrl: string | null;
+      episode: number;
+      publishAt: string;
+    }[] = [];
+    for (const raw of collections) {
+      const c = this.withInstants(raw);
+      const items = [...c.items].sort((a, b) => a.position - b.position);
+      let number = 0;
+      for (const item of items) {
+        const v = item.video;
+        if (isReleased(v)) number++;
+        else if (isUpcoming(v, now)) {
+          number++;
+          if (v.publishAt!.getTime() <= until) {
+            out.push({
+              seriesId: Number(c.id),
+              title: c.title,
+              posterUrl: await this.media.forBrowser(c.coverUrl),
+              verticalUrl: await this.media.forBrowser(c.verticalUrl),
+              episode: number,
+              publishAt: v.publishAt!.toISOString(),
+            });
+          }
+        }
+      }
+    }
+    return out.sort((a, b) => a.publishAt.localeCompare(b.publishAt));
   }
 
   /** How many released episodes a listed series has; 404 unless it has one */
@@ -162,21 +238,23 @@ export class CatalogService {
     return count;
   }
 
-  /** WebVTT for a released, unlocked episode; 404 for anything else, so paid episodes stay closed */
-  async subtitlesVtt(videoId: number): Promise<string> {
+  /** WebVTT for a released episode this viewer may watch; 404 for anything else, so paid episodes stay closed */
+  async subtitlesVtt(videoId: number, viewerId?: number): Promise<string> {
     const id = BigInt(videoId);
     const series = await this.prisma.collection.findMany({
       where: { ...LISTED, items: { some: { videoId: id } } },
       include: WITH_ITEMS,
     });
-    const open = series
-      .map((c) => this.withInstants(c))
-      .some((c) =>
-        episodes(c.items).some(
-          (e) =>
-            e.video.id === id && isReleased(e.video) && !isLocked(c, e.number),
-        ),
+    let open = false;
+    for (const c of series.map((s) => this.withInstants(s))) {
+      const access = await this.access(viewerId, c.id);
+      open ||= episodes(c.items).some(
+        (e) =>
+          e.video.id === id &&
+          isReleased(e.video) &&
+          !closed(c, e.number, access),
       );
+    }
     if (!open) throw notFound();
     const trackId = (await this.tracksFor([id])).get(id);
     if (trackId == null) throw notFound();
@@ -257,9 +335,10 @@ export class CatalogService {
     c: DbCollection,
     e: Episode<DbVideo>,
     hasSubtitles: boolean,
+    access: Access | null,
   ): Promise<EpisodeView> {
     const v = e.video;
-    const locked = isLocked(c, e.number);
+    const locked = closed(c, e.number, access);
     return {
       number: e.number,
       videoId: Number(v.id),
@@ -267,6 +346,7 @@ export class CatalogService {
       durationSeconds: v.durationSeconds,
       thumbnailUrl: await this.media.forBrowser(v.thumbnailUrl),
       locked,
+      premium: isLocked(c, e.number),
       videoUrl: locked ? null : await this.media.forBrowser(v.videoUrl),
       subtitlesUrl:
         !locked && hasSubtitles ? `/episodes/${v.id}/subtitles.vtt` : null,
@@ -299,5 +379,24 @@ export class CatalogService {
     return out;
   }
 }
+
+/** What a viewer has paid for in a series (see CatalogService.access) */
+export interface Access {
+  /** VIP time is running: every series is open */
+  vip: boolean;
+  /** Bought the whole series */
+  series: boolean;
+  /** Episodes unlocked one by one with coins */
+  episodes: Set<number>;
+}
+
+/** A VIP episode this viewer hasn't paid for */
+export const closed = (
+  c: { vip: boolean; freeEpisodes: number },
+  n: number,
+  access: Access | null,
+) =>
+  isLocked(c, n) &&
+  !(access && (access.vip || access.series || access.episodes.has(n)));
 
 const notFound = () => new NotFoundException('Series or episode not found');
