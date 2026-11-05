@@ -16,6 +16,8 @@ import { APP_CONFIG, type AppConfig } from '../config';
 import { CatalogService } from '../catalog/catalog.service';
 import { pricesFrom, type Prices } from '../site/prices';
 import { Khqr } from './khqr';
+import { coinsToTakeBack, vipShortened } from '../growth/rules';
+import { coinPromotion, promoCoins, randomCode } from '../marketing/rules';
 import {
   billNumber,
   checkInReward,
@@ -23,6 +25,7 @@ import {
   nextStreak,
   previousDay,
   quote,
+  topUpBonus,
   vipExtended,
   type OrderKind,
 } from './rules';
@@ -41,6 +44,13 @@ export interface WalletView {
   episodeCoins: number;
   /** KHQR payments are set up (KHQR_ACCOUNT_ID) */
   paymentsOn: boolean;
+  /** Extra coins (percent) on this viewer's first coin pack; 0 once they've paid for anything */
+  firstTopUpBonusPercent: number;
+  /** A running "extra coins" promotion (applies to every pack until it ends) */
+  coinPromo: { percent: number; title: string; endsAt: string } | null;
+  /** Episodes this viewer may still unlock today by watching an ad (0 when ads are off or none run) */
+  adUnlocksLeft: number;
+  adUnlocksPerDay: number;
 }
 
 export interface OrderView {
@@ -51,7 +61,14 @@ export interface OrderView {
   seriesId: number | null;
   seriesTitle: string | null;
   months: number | null;
-  status: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELLED';
+  /** First top-up bonus added on top of the pack, once paid */
+  bonusCoins: number | null;
+  /** Extra coins from a running promotion, once paid */
+  promoCoins: number | null;
+  /** Bought as a gift: its code once paid (null before) */
+  gift: boolean;
+  giftCode: string | null;
+  status: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELLED' | 'REFUNDED';
   billNumber: string;
   /** The KHQR to show while it can still be paid; null afterwards */
   khqr: string | null;
@@ -100,12 +117,32 @@ export class CommerceService {
 
   async wallet(viewerId: number): Promise<WalletView> {
     await this.requireViewer(viewerId);
-    const [wallet, prices, last] = await Promise.all([
-      this.prisma.wallet.findUnique({ where: { viewerId: BigInt(viewerId) } }),
-      this.prices(),
-      this.lastCheckIn(viewerId),
-    ]);
+    const [wallet, prices, last, paidBefore, promos, adsToday, activeAds] =
+      await Promise.all([
+        this.prisma.wallet.findUnique({
+          where: { viewerId: BigInt(viewerId) },
+        }),
+        this.prices(),
+        this.lastCheckIn(viewerId),
+        // Refunded orders count too: a refund must not bring the first-purchase bonus back
+        this.prisma.order.count({
+          where: {
+            viewerId: BigInt(viewerId),
+            status: { in: ['PAID', 'REFUNDED'] },
+          },
+        }),
+        this.catalog.promotions(),
+        this.prisma.adView.count({
+          where: {
+            viewerId: BigInt(viewerId),
+            day: new Date(`${this.today()}T00:00:00Z`),
+            completedAt: { not: null },
+          },
+        }),
+        this.prisma.ad.count({ where: { active: true } }),
+      ]);
     const today = this.today();
+    const promo = coinPromotion(promos, new Date());
     const doneToday = last?.day === today;
     const streak = doneToday
       ? last.streak
@@ -127,6 +164,19 @@ export class CommerceService {
       },
       episodeCoins: prices.episodeCoins,
       paymentsOn: this.khqr.enabled,
+      firstTopUpBonusPercent:
+        paidBefore === 0 ? prices.firstTopUpBonusPercent : 0,
+      coinPromo: promo
+        ? {
+            percent: promo.bonusPercent ?? 0,
+            title: promo.title,
+            endsAt: promo.endsAt.toISOString(),
+          }
+        : null,
+      adUnlocksPerDay: activeAds ? prices.adUnlocksPerDay : 0,
+      adUnlocksLeft: activeAds
+        ? Math.max(0, prices.adUnlocksPerDay - adsToday)
+        : 0,
     };
   }
 
@@ -265,6 +315,9 @@ export class CommerceService {
       coins?: number;
       months?: number;
       seriesId?: number;
+      /** For someone else: coins or VIP only */
+      gift?: boolean;
+      giftMessage?: string;
     },
   ): Promise<OrderView> {
     await this.requireViewer(viewerId);
@@ -279,6 +332,12 @@ export class CommerceService {
       throw new BadRequestException({
         code: 'NO_PRODUCT',
         message: 'No such product',
+      });
+    }
+    if (req.gift && q.kind === 'SERIES') {
+      throw new BadRequestException({
+        code: 'NO_PRODUCT',
+        message: 'Coins and VIP can be gifts; a series can not',
       });
     }
     if (q.kind === 'SERIES') {
@@ -317,6 +376,11 @@ export class CommerceService {
         khqrMd5: md5,
         expiresAt: this.time.toWall(expiresAt),
         createdAt: this.time.toWall(now),
+        gift: !!req.gift,
+        note:
+          req.gift && req.giftMessage?.trim()
+            ? `gift: ${req.giftMessage.trim()}`.slice(0, 300)
+            : null,
       },
     });
     return (await this.views([order]))[0];
@@ -372,6 +436,8 @@ export class CommerceService {
    */
   async markPaid(orderId: number, paid: PaidBy): Promise<DbOrder> {
     const now = new Date();
+    const prices = await this.prices();
+    const promo = coinPromotion(await this.catalog.promotions(), now);
     const result = await this.prisma.$transaction(async (tx) => {
       const moved = await tx.order.updateMany({
         where: { id: BigInt(orderId), status: { in: ['PENDING', 'EXPIRED'] } },
@@ -387,7 +453,9 @@ export class CommerceService {
       });
       if (!order) throw new NotFoundException('Order not found');
       if (moved.count === 1 && order.viewerId != null) {
-        await this.fulfil(tx, order, now);
+        return order.gift
+          ? this.makeGift(tx, order, now, promo?.bonusPercent ?? 0)
+          : this.fulfil(tx, order, now, prices, promo?.bonusPercent ?? 0);
       }
       return order;
     });
@@ -412,13 +480,232 @@ export class CommerceService {
     return order;
   }
 
+  // ---------- late payment notices ----------
+
+  /**
+   * Orders paid since the viewer last looked (they closed the KHQR screen and paid later): first asks
+   * Bakong about their recent pending orders, then lists paid ones not yet acknowledged (last 7 days).
+   */
+  async paidNews(viewerId: number): Promise<OrderView[]> {
+    await this.requireViewer(viewerId);
+    const now = new Date();
+    if (this.khqr.autoConfirm) {
+      const pending = await this.prisma.order.findMany({
+        where: {
+          viewerId: BigInt(viewerId),
+          status: 'PENDING',
+          createdAt: {
+            gte: this.time.toWall(new Date(now.getTime() - 2 * 3600_000)),
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      });
+      for (const o of pending) {
+        await this.order(viewerId, Number(o.id)).catch(() => null);
+      }
+    }
+    const rows = await this.prisma.order.findMany({
+      where: {
+        viewerId: BigInt(viewerId),
+        status: 'PAID',
+        seenAt: null,
+        paidAt: {
+          gte: this.time.toWall(new Date(now.getTime() - 7 * 86_400_000)),
+        },
+      },
+      orderBy: { paidAt: 'desc' },
+      take: 5,
+    });
+    return this.views(rows);
+  }
+
+  /** The viewer saw that this order went through (on the KHQR screen or in the notice) */
+  async markSeen(viewerId: number, orderId: number) {
+    await this.prisma.order.updateMany({
+      where: { id: BigInt(orderId), viewerId: BigInt(viewerId), seenAt: null },
+      data: { seenAt: this.time.toWall(new Date()) },
+    });
+  }
+
+  // ---------- admin support ----------
+
+  /**
+   * Refund a paid order: marks it REFUNDED and takes back what it delivered, once. Coins (with any
+   * bonus) come back only as far as the wallet still has them; a series unlock is removed; VIP time
+   * is shortened. The money itself is returned outside RuengFlix (bank transfer).
+   */
+  async refund(orderId: number, by: string, reason: string) {
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const moved = await tx.order.updateMany({
+        where: { id: BigInt(orderId), status: 'PAID' },
+        data: {
+          status: 'REFUNDED',
+          refundedAt: this.time.toWall(now),
+          refundedBy: by.slice(0, 100),
+          refundReason: reason.slice(0, 300),
+        },
+      });
+      const order = await tx.order.findUnique({
+        where: { id: BigInt(orderId) },
+      });
+      if (!order) throw new NotFoundException('Order not found');
+      if (moved.count === 0) {
+        throw new ConflictException({
+          code: 'NOT_PAID',
+          message:
+            order.status === 'REFUNDED'
+              ? 'Already refunded'
+              : 'Only paid orders can be refunded',
+        });
+      }
+      let coinsTaken = 0;
+      if (order.gift) {
+        // A gift nobody has redeemed is cancelled; a redeemed one can't be taken back from the friend
+        const voided = await tx.gift.updateMany({
+          where: { orderId: order.id, redeemedAt: null, voidedAt: null },
+          data: { voidedAt: this.time.toWall(now) },
+        });
+        if (voided.count === 0) {
+          throw new ConflictException({
+            code: 'GIFT_REDEEMED',
+            message: 'The gift was already redeemed: it can not be refunded',
+          });
+        }
+      } else if (order.viewerId != null) {
+        const viewerId = Number(order.viewerId);
+        if (order.kind === 'COINS') {
+          const wallet = await this.ensureWallet(tx, viewerId);
+          await tx.$queryRaw`select 1 from streaming_wallets where viewer_id = ${order.viewerId} for update`;
+          const fresh = await tx.wallet.findUnique({
+            where: { viewerId: order.viewerId },
+          });
+          coinsTaken = coinsToTakeBack(
+            (order.coins ?? 0) +
+              (order.bonusCoins ?? 0) +
+              (order.promoCoins ?? 0),
+            fresh?.coins ?? wallet.coins,
+          );
+          if (coinsTaken > 0) {
+            await this.addCoins(
+              tx,
+              viewerId,
+              -coinsTaken,
+              'REFUND',
+              `order:${order.id}`,
+            );
+          }
+        } else if (order.kind === 'SERIES') {
+          await tx.entitlement.deleteMany({
+            where: { viewerId: order.viewerId, orderId: order.id },
+          });
+        } else if (order.kind === 'VIP' && order.months) {
+          const wallet = await this.ensureWallet(tx, viewerId);
+          const until = vipShortened(
+            this.time.toInstant(wallet.vipUntil),
+            now,
+            order.months,
+          );
+          await tx.wallet.update({
+            where: { viewerId: order.viewerId },
+            data: {
+              vipUntil: until ? this.time.toWall(until) : null,
+              updatedAt: this.time.toWall(now),
+            },
+          });
+        }
+      }
+      this.log.log(`Order ${orderId} refunded by ${by}: ${reason}`);
+      return { id: Number(order.id), status: order.status, coinsTaken };
+    });
+  }
+
+  /**
+   * An admin gives coins (or takes them back, with a negative amount, never below 0) for a support
+   * case. The ledger keeps who and why.
+   */
+  async grantCoins(
+    viewerId: number,
+    coins: number,
+    by: string,
+    reason: string,
+  ) {
+    await this.requireViewer(viewerId);
+    if (!Number.isInteger(coins) || coins === 0 || Math.abs(coins) > 10_000) {
+      throw new BadRequestException({
+        code: 'BAD_AMOUNT',
+        message: 'From -10,000 to 10,000 coins, not 0',
+      });
+    }
+    const ref = `${by}: ${reason}`.slice(0, 100);
+    let applied = coins;
+    await this.prisma.$transaction(async (tx) => {
+      const wallet = await this.ensureWallet(tx, viewerId);
+      if (coins < 0) {
+        await tx.$queryRaw`select 1 from streaming_wallets where viewer_id = ${BigInt(viewerId)} for update`;
+        const fresh = await tx.wallet.findUnique({
+          where: { viewerId: BigInt(viewerId) },
+        });
+        applied = -coinsToTakeBack(-coins, fresh?.coins ?? wallet.coins);
+        if (applied === 0) return;
+      }
+      await this.addCoins(tx, viewerId, applied, 'ADMIN', ref);
+    });
+    this.log.log(`Viewer ${viewerId}: ${applied} coins by ${by} (${reason})`);
+    return { applied, wallet: await this.wallet(viewerId) };
+  }
+
+  /** Coins added inside another transaction (missions, invites); see addCoins */
+  credit(tx: Tx, viewerId: number, delta: number, reason: string, ref: string) {
+    return this.addCoins(tx, viewerId, delta, reason, ref);
+  }
+
   // ---------- helpers ----------
 
-  private async fulfil(tx: Tx, order: DbOrder, now: Date) {
+  /** Deliver a just-paid order; returns it as stored afterwards */
+  private async fulfil(
+    tx: Tx,
+    order: DbOrder,
+    now: Date,
+    prices: Prices,
+    promoPercent: number,
+  ): Promise<DbOrder> {
     const viewerId = Number(order.viewerId);
     const ref = `order:${order.id}`;
     if (order.kind === 'COINS' && order.coins) {
-      await this.addCoins(tx, viewerId, order.coins, 'PURCHASE', ref);
+      const packCoins = order.coins;
+      await this.addCoins(tx, viewerId, packCoins, 'PURCHASE', ref);
+      // A running "extra coins" promotion, on top of any first top-up bonus
+      const extra = promoCoins(packCoins, promoPercent);
+      if (extra > 0) {
+        await this.addCoins(tx, viewerId, extra, 'PROMO', ref);
+        order = await tx.order.update({
+          where: { id: order.id },
+          data: { promoCoins: extra },
+        });
+      }
+      // First paid order of this viewer: bonus coins. The wallet row is locked first, so two orders
+      // paid at the same moment take turns and only the first one counts as "first".
+      await tx.$queryRaw`select 1 from streaming_wallets where viewer_id = ${order.viewerId} for update`;
+      const paidBefore = await tx.order.count({
+        where: {
+          viewerId: order.viewerId,
+          status: { in: ['PAID', 'REFUNDED'] },
+          id: { not: order.id },
+        },
+      });
+      const bonus =
+        paidBefore === 0
+          ? topUpBonus(packCoins, prices.firstTopUpBonusPercent)
+          : 0;
+      if (bonus > 0) {
+        await this.addCoins(tx, viewerId, bonus, 'BONUS', ref);
+        return tx.order.update({
+          where: { id: order.id },
+          data: { bonusCoins: bonus },
+        });
+      }
     } else if (order.kind === 'SERIES' && order.collectionId != null) {
       await tx.entitlement.upsert({
         where: {
@@ -453,6 +740,148 @@ export class CommerceService {
         },
       });
     }
+    return order;
+  }
+
+  /**
+   * A paid gift order: a code for the buyer to send, instead of coins or VIP for them. A coin gift
+   * carries the promotion running when it was paid. Codes are retried on the (rare) clash.
+   */
+  private async makeGift(
+    tx: Tx,
+    order: DbOrder,
+    now: Date,
+    promoPercent: number,
+  ): Promise<DbOrder> {
+    const coins =
+      order.kind === 'COINS' && order.coins
+        ? order.coins + promoCoins(order.coins, promoPercent)
+        : null;
+    const message = order.note?.startsWith('gift: ')
+      ? order.note.slice(6).slice(0, 140)
+      : null;
+    for (let attempt = 0; ; attempt++) {
+      const code = randomCode(10);
+      const clash = await tx.gift.findUnique({ where: { code } });
+      if (clash && attempt < 5) continue;
+      await tx.gift.create({
+        data: {
+          code,
+          orderId: order.id,
+          giverId: order.viewerId,
+          kind: order.kind === 'VIP' ? 'VIP' : 'COINS',
+          coins,
+          months: order.kind === 'VIP' ? order.months : null,
+          message,
+          createdAt: this.time.toWall(now),
+        },
+      });
+      break;
+    }
+    return order;
+  }
+
+  /**
+   * Redeem a gift code: its coins or VIP time go to this viewer, once (the conditional update decides
+   * who wins when two people try the same code). The giver can't redeem their own gift.
+   */
+  async redeemGift(viewerId: number, code: string) {
+    await this.requireViewer(viewerId);
+    const now = new Date();
+    const gift = await this.prisma.gift.findUnique({ where: { code } });
+    if (!gift || gift.voidedAt) {
+      throw new NotFoundException({ code: 'NO_GIFT', message: 'No such gift' });
+    }
+    if (gift.giverId != null && Number(gift.giverId) === viewerId) {
+      throw new ConflictException({
+        code: 'OWN_GIFT',
+        message: 'Send this gift to a friend: it is yours',
+      });
+    }
+    await this.prisma.$transaction(async (tx) => {
+      const taken = await tx.gift.updateMany({
+        where: { id: gift.id, redeemedAt: null, voidedAt: null },
+        data: {
+          redeemedBy: BigInt(viewerId),
+          redeemedAt: this.time.toWall(now),
+        },
+      });
+      if (taken.count === 0) {
+        throw new ConflictException({
+          code: 'GIFT_TAKEN',
+          message: 'This gift was already redeemed',
+        });
+      }
+      const ref = `gift:${gift.code}`;
+      if (gift.kind === 'COINS' && gift.coins) {
+        await this.addCoins(tx, viewerId, gift.coins, 'GIFT', ref);
+      } else if (gift.kind === 'VIP' && gift.months) {
+        const wallet = await this.ensureWallet(tx, viewerId);
+        const until = vipExtended(
+          this.time.toInstant(wallet.vipUntil),
+          now,
+          gift.months,
+        );
+        await tx.wallet.update({
+          where: { viewerId: BigInt(viewerId) },
+          data: {
+            vipUntil: this.time.toWall(until),
+            updatedAt: this.time.toWall(now),
+          },
+        });
+      }
+    });
+    this.log.log(`Gift ${gift.code} redeemed by viewer ${viewerId}`);
+    return {
+      kind: gift.kind,
+      coins: gift.coins,
+      months: gift.months,
+      wallet: await this.wallet(viewerId),
+    };
+  }
+
+  /** A gift as anyone with the link sees it (who sent it, what's inside, whether it's still there) */
+  async giftInfo(code: string) {
+    const gift = await this.prisma.gift.findUnique({ where: { code } });
+    if (!gift || gift.voidedAt) {
+      throw new NotFoundException({ code: 'NO_GIFT', message: 'No such gift' });
+    }
+    const giver = gift.giverId
+      ? await this.prisma.viewer.findUnique({
+          where: { id: gift.giverId },
+          select: { displayName: true },
+        })
+      : null;
+    return {
+      code: gift.code,
+      kind: gift.kind as 'COINS' | 'VIP',
+      coins: gift.coins,
+      months: gift.months,
+      message: gift.message,
+      from: giver?.displayName ?? null,
+      giverId: gift.giverId == null ? null : Number(gift.giverId),
+      redeemed: gift.redeemedAt != null,
+      createdAt: this.time.toInstant(gift.createdAt).toISOString(),
+    };
+  }
+
+  /** The gifts a viewer bought, newest first, with whether each was redeemed */
+  async myGifts(viewerId: number) {
+    await this.requireViewer(viewerId);
+    const rows = await this.prisma.gift.findMany({
+      where: { giverId: BigInt(viewerId), voidedAt: null },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+    return rows.map((g) => ({
+      code: g.code,
+      kind: g.kind,
+      coins: g.coins,
+      months: g.months,
+      message: g.message,
+      redeemed: g.redeemedAt != null,
+      createdAt: this.time.toInstant(g.createdAt).toISOString(),
+    }));
   }
 
   private async addCoins(
@@ -521,6 +950,16 @@ export class CommerceService {
         rows.map((r) => r.collectionId).filter((x): x is bigint => x != null),
       ),
     ];
+    const gifts = new Map(
+      (
+        await this.prisma.gift.findMany({
+          where: {
+            orderId: { in: rows.filter((r) => r.gift).map((r) => r.id) },
+          },
+          select: { orderId: true, code: true },
+        })
+      ).map((g) => [g.orderId, g.code]),
+    );
     const titles = new Map(
       (
         await this.prisma.collection.findMany({
@@ -541,6 +980,10 @@ export class CommerceService {
         seriesTitle:
           r.collectionId == null ? null : (titles.get(r.collectionId) ?? null),
         months: r.months,
+        bonusCoins: r.bonusCoins,
+        promoCoins: r.promoCoins,
+        gift: r.gift,
+        giftCode: gifts.get(r.id) ?? null,
         status: r.status as OrderView['status'],
         billNumber: r.billNumber,
         khqr: r.status === 'PENDING' && expiresAt > now ? r.khqr : null,

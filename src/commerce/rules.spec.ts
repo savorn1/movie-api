@@ -6,6 +6,7 @@ import {
   nextStreak,
   previousDay,
   quote,
+  topUpBonus,
   vipExtended,
 } from './rules';
 
@@ -82,5 +83,13 @@ describe('billNumber', () => {
     const b = billNumber(1793777371899, () => 0.5);
     expect(b).toMatch(/^RF-[0-9A-Z]+-[0-9A-Z]{4}$/);
     expect(b.length).toBeLessThanOrEqual(25);
+  });
+});
+
+describe('topUpBonus', () => {
+  it('adds a share of the pack, rounded down, or nothing when off', () => {
+    expect(topUpBonus(100, 50)).toBe(50);
+    expect(topUpBonus(300, 33)).toBe(99);
+    expect(topUpBonus(1000, 0)).toBe(0);
   });
 });

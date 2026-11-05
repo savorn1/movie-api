@@ -12,14 +12,32 @@ import { APP_CONFIG, type AppConfig } from '../config';
 import { CatalogService } from '../catalog/catalog.service';
 import { dayIn } from '../commerce/rules';
 import type { CommentDto, PushSubscriptionDto } from './engagement.dto';
+import { fanStatus, type FanBadge } from '../marketing/rules';
 
 export interface CommentView {
   id: number;
   body: string;
   createdAt: string;
-  author: { displayName: string; photoUrl: string | null };
+  author: {
+    displayName: string;
+    photoUrl: string | null;
+    /** Fan level 1–6 and badges (see fanStatus); level 0 for RuengFlix's own replies */
+    level: number;
+    badges: FanBadge[];
+  };
+  /** Seconds into the episode it was written at, while watching */
+  atSeconds: number | null;
   /** Written by the viewer asking, who may delete it */
   mine: boolean;
+  likes: number;
+  /** The viewer asking has liked it */
+  liked: boolean;
+  /** Pinned by an admin: shown first */
+  pinned: boolean;
+  /** Written by RuengFlix in the admin portal */
+  official: boolean;
+  /** Official replies under it (oldest first); always empty on replies */
+  replies: CommentView[];
 }
 
 /** Reports that hide a comment until an admin looks at it */
@@ -44,38 +62,100 @@ export class EngagementService {
   // ---------- comments ----------
 
   async comments(seriesId: number, episode: number, viewerId?: number) {
+    // Top-level comments only; official replies come under the one they answer
     const where = {
       collectionId: BigInt(seriesId),
       episode,
       hiddenAt: null,
+      parentId: null,
     };
     const [rows, total] = await Promise.all([
       this.prisma.comment.findMany({
         where,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        // The pinned one first, then newest
+        orderBy: [
+          { pinnedAt: { sort: 'desc', nulls: 'last' } },
+          { createdAt: 'desc' },
+          { id: 'desc' },
+        ],
         take: COMMENT_PAGE,
       }),
       this.prisma.comment.count({ where }),
     ]);
+    const replies = rows.length
+      ? await this.prisma.comment.findMany({
+          where: { parentId: { in: rows.map((r) => r.id) }, hiddenAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        })
+      : [];
+    const viewerIds = [
+      ...new Set(
+        [...rows, ...replies]
+          .map((r) => r.viewerId)
+          .filter((v): v is bigint => v != null),
+      ),
+    ];
     const authors = new Map(
       (
         await this.prisma.viewer.findMany({
-          where: { id: { in: [...new Set(rows.map((r) => r.viewerId))] } },
+          where: { id: { in: viewerIds } },
           select: { id: true, displayName: true, photoUrl: true },
         })
       ).map((v) => [v.id, v]),
     );
-    return {
-      total,
-      items: rows.map((r): CommentView => ({
+    const fans = await this.fanStatuses(viewerIds);
+    const liked = new Set(
+      viewerId == null || !rows.length
+        ? []
+        : (
+            await this.prisma.commentLike.findMany({
+              where: {
+                viewerId: BigInt(viewerId),
+                commentId: { in: rows.map((r) => r.id) },
+              },
+              select: { commentId: true },
+            })
+          ).map((l) => l.commentId),
+    );
+    const view = (r: (typeof rows)[number]): CommentView => {
+      const author = r.viewerId != null ? authors.get(r.viewerId) : undefined;
+      return {
         id: Number(r.id),
         body: r.body,
         createdAt: this.time.toInstant(r.createdAt).toISOString(),
         author: {
-          displayName: authors.get(r.viewerId)?.displayName ?? '',
-          photoUrl: authors.get(r.viewerId)?.photoUrl ?? null,
+          displayName: r.authorAdmin
+            ? 'RuengFlix'
+            : (author?.displayName ?? ''),
+          photoUrl: r.authorAdmin ? null : (author?.photoUrl ?? null),
+          level:
+            r.authorAdmin || r.viewerId == null
+              ? 0
+              : (fans.get(r.viewerId)?.level ?? 1),
+          badges:
+            r.authorAdmin || r.viewerId == null
+              ? []
+              : (fans.get(r.viewerId)?.badges ?? []),
         },
-        mine: viewerId != null && Number(r.viewerId) === viewerId,
+        atSeconds: r.atSeconds,
+        official: !!r.authorAdmin,
+        mine:
+          viewerId != null &&
+          r.viewerId != null &&
+          Number(r.viewerId) === viewerId,
+        likes: r.likeCount,
+        liked: liked.has(r.id),
+        pinned: r.pinnedAt != null,
+        replies: [],
+      };
+    };
+    return {
+      total,
+      items: rows.map((r) => ({
+        ...view(r),
+        replies: replies
+          .filter((x) => x.parentId === r.id)
+          .map((x) => ({ ...view(x), replies: [] })),
       })),
     };
   }
@@ -103,15 +183,102 @@ export class EngagementService {
         viewerId: BigInt(viewerId),
         body,
         createdAt: this.time.toWall(new Date()),
+        atSeconds: c.atSeconds ?? null,
       },
     });
+    const fan = (await this.fanStatuses([viewer.id])).get(viewer.id);
     return {
       id: Number(row.id),
       body,
       createdAt: this.time.toInstant(row.createdAt).toISOString(),
-      author: { displayName: viewer.displayName, photoUrl: viewer.photoUrl },
+      atSeconds: row.atSeconds,
+      author: {
+        displayName: viewer.displayName,
+        photoUrl: viewer.photoUrl,
+        level: fan?.level ?? 1,
+        badges: fan?.badges ?? [],
+      },
       mine: true,
+      likes: 0,
+      liked: false,
+      pinned: false,
+      official: false,
+      replies: [],
     };
+  }
+
+  /**
+   * Comments written at a moment of the episode, oldest moment first, to float across the video as
+   * it plays (hidden ones and replies left out). Short: just what the overlay draws.
+   */
+  async timedComments(seriesId: number, episode: number) {
+    const rows = await this.prisma.comment.findMany({
+      where: {
+        collectionId: BigInt(seriesId),
+        episode,
+        hiddenAt: null,
+        parentId: null,
+        atSeconds: { not: null },
+      },
+      orderBy: [{ atSeconds: 'asc' }, { id: 'asc' }],
+      take: 500,
+      select: { id: true, body: true, atSeconds: true, likeCount: true },
+    });
+    return rows.map((r) => ({
+      id: Number(r.id),
+      at: r.atSeconds!,
+      body: r.body.length > 80 ? `${r.body.slice(0, 79)}…` : r.body,
+      likes: r.likeCount,
+    }));
+  }
+
+  /** A viewer's fan level and badges (shown on their Me page) */
+  async fan(viewerId: number) {
+    const stats = (await this.fanStatuses([BigInt(viewerId)])).get(
+      BigInt(viewerId),
+    );
+    return (
+      stats ?? { level: 1, badges: [], episodes: 0, likes: 0, bestStreak: 0 }
+    );
+  }
+
+  /** Fan level and badges for several viewers, from episodes finished, likes received and streaks */
+  private async fanStatuses(ids: bigint[]) {
+    const out = new Map<
+      bigint,
+      ReturnType<typeof fanStatus> & {
+        episodes: number;
+        likes: number;
+        bestStreak: number;
+      }
+    >();
+    if (!ids.length) return out;
+    const [watches, likes, streaks] = await Promise.all([
+      this.prisma.viewerWatch.groupBy({
+        by: ['viewerId'],
+        where: { viewerId: { in: ids } },
+        _count: { _all: true },
+      }),
+      this.prisma.comment.groupBy({
+        by: ['viewerId'],
+        where: { viewerId: { in: ids } },
+        _sum: { likeCount: true },
+      }),
+      this.prisma.checkIn.groupBy({
+        by: ['viewerId'],
+        where: { viewerId: { in: ids } },
+        _max: { streak: true },
+      }),
+    ]);
+    for (const id of ids) {
+      const stats = {
+        episodes: watches.find((w) => w.viewerId === id)?._count._all ?? 0,
+        likes: likes.find((l) => l.viewerId === id)?._sum.likeCount ?? 0,
+        bestStreak: streaks.find((s) => s.viewerId === id)?._max.streak ?? 0,
+      };
+      out.set(id, { ...fanStatus(stats), ...stats });
+    }
+    return out;
   }
 
   /** Viewers delete only their own comments */
@@ -120,6 +287,37 @@ export class EngagementService {
       where: { id: BigInt(commentId), viewerId: BigInt(viewerId) },
     });
     if (gone.count === 0) throw new NotFoundException('Comment not found');
+  }
+
+  /** Like or unlike a visible comment (one like per viewer); returns the new count */
+  async likeComment(viewerId: number, commentId: number, like: boolean) {
+    const comment = await this.prisma.comment.findFirst({
+      where: { id: BigInt(commentId), hiddenAt: null },
+      select: { id: true },
+    });
+    if (!comment) throw new NotFoundException('Comment not found');
+    const id = comment.id;
+    const viewer = BigInt(viewerId);
+    await this.prisma.$transaction(async (tx) => {
+      // The count moves only when the like row really changed, so repeated taps can't drift it
+      const changed = like
+        ? await tx.$executeRaw`
+            insert into streaming_comment_likes (comment_id, viewer_id, created_at)
+            values (${id}, ${viewer}, ${this.time.toWall(new Date())})
+            on conflict do nothing`
+        : await tx.$executeRaw`
+            delete from streaming_comment_likes where comment_id = ${id} and viewer_id = ${viewer}`;
+      if (changed > 0) {
+        await tx.$executeRaw`
+          update streaming_comments set like_count = greatest(0, like_count + ${like ? 1 : -1})
+          where id = ${id}`;
+      }
+    });
+    const after = await this.prisma.comment.findUnique({
+      where: { id },
+      select: { likeCount: true },
+    });
+    return { likes: after?.likeCount ?? 0, liked: like };
   }
 
   /** One report per viewer per comment; enough of them hide it until an admin decides */

@@ -15,6 +15,8 @@ import {
   type RuleVideo,
 } from './rules';
 import { toVtt } from './vtt';
+import { pricesFrom } from '../site/prices';
+import { freePromotion, type PromotionRow } from '../marketing/rules';
 
 export interface Series {
   id: number;
@@ -38,6 +40,9 @@ export interface Series {
   nextEpisodeAt: string | null;
   /** Place in the hero slider (1 first), set in videolingo-web; null = not a hero pick */
   featuredRank: number | null;
+  /** A promotion makes this VIP series free for everyone until then (and its banner title) */
+  freeUntil: string | null;
+  promoTitle: string | null;
 }
 
 export interface EpisodeView {
@@ -54,6 +59,14 @@ export interface EpisodeView {
   videoUrl: string | null;
   /** Path on movie-api; null when locked or without published subtitles */
   subtitlesUrl: string | null;
+  /**
+   * The first VIP episode only, while locked: a link to watch its opening before paying, and how many
+   * seconds of it. The player stops there; the link itself isn't cut, so a preview is a teaser, not a
+   * lock (Settings › previewSeconds = 0 turns them off).
+   */
+  preview: { url: string; seconds: number } | null;
+  /** Khmer voice-over track (made or uploaded in VideoLingo); null when locked or there is none */
+  dubUrl: string | null;
 }
 
 export interface SeriesDetail {
@@ -133,8 +146,9 @@ export class CatalogService {
       include: WITH_ITEMS,
     });
     const now = new Date();
+    const promos = await this.promotions();
     const all = await Promise.all(
-      collections.map((c) => this.summarize(this.withInstants(c), now)),
+      collections.map((c) => this.summarize(this.withInstants(c), now, promos)),
     );
     return all
       .filter((s) => s.episodes > 0)
@@ -149,16 +163,29 @@ export class CatalogService {
    */
   async get(id: number, viewerId?: number): Promise<SeriesDetail> {
     const c = await this.listed(id);
-    const series = await this.summarize(c, new Date());
+    const series = await this.summarize(c, new Date(), await this.promotions());
     if (series.episodes === 0) throw notFound();
     const access = await this.access(viewerId, c.id);
     const eps = episodes(c.items);
     const open = eps.filter((e) => !closed(c, e.number, access));
-    const tracks = await this.tracksFor(open.map((e) => e.video.id));
+    const [tracks, previewSeconds, dubs] = await Promise.all([
+      this.tracksFor(open.map((e) => e.video.id)),
+      this.previewSeconds(),
+      this.dubsFor(open.map((e) => e.video.id)),
+    ]);
     return {
       series,
       episodes: await Promise.all(
-        eps.map((e) => this.toView(c, e, tracks.has(e.video.id), access)),
+        eps.map((e) =>
+          this.toView(
+            c,
+            e,
+            tracks.has(e.video.id),
+            access,
+            previewSeconds,
+            dubs.get(e.video.id) ?? null,
+          ),
+        ),
       ),
     };
   }
@@ -168,7 +195,13 @@ export class CatalogService {
     viewerId: number | undefined,
     seriesId: bigint,
   ): Promise<Access | null> {
-    if (!viewerId) return null;
+    // A "series free" promotion opens it for everyone, signed in or not
+    const free = !!freePromotion(await this.promotions(), seriesId, new Date());
+    if (!viewerId) {
+      return free
+        ? { vip: false, series: false, free, episodes: new Set() }
+        : null;
+    }
     const [wallet, rows] = await Promise.all([
       this.prisma.wallet.findUnique({
         where: { viewerId: BigInt(viewerId) },
@@ -183,8 +216,39 @@ export class CatalogService {
     return {
       vip: !!vipUntil && vipUntil > new Date(),
       series: rows.some((r) => r.episode === 0),
+      free,
       episodes: new Set(rows.map((r) => r.episode).filter((n) => n > 0)),
     };
+  }
+
+  private promoCache: { at: number; rows: PromotionRow[] } | null = null;
+
+  /**
+   * Promotions that haven't ended (kept for 15 s: every catalog and episode request needs them).
+   * Database wall-clock times come back as real instants.
+   */
+  async promotions(): Promise<PromotionRow[]> {
+    if (this.promoCache && Date.now() - this.promoCache.at < 15_000) {
+      return this.promoCache.rows;
+    }
+    const rows = await this.prisma.promotion.findMany({
+      where: { endsAt: { gt: this.time.toWall(new Date()) } },
+    });
+    const out = rows.map((r) => ({
+      kind: r.kind,
+      title: r.title,
+      collectionId: r.collectionId,
+      bonusPercent: r.bonusPercent,
+      startsAt: this.time.toInstant(r.startsAt),
+      endsAt: this.time.toInstant(r.endsAt),
+    }));
+    this.promoCache = { at: Date.now(), rows: out };
+    return out;
+  }
+
+  /** Drops the promotion cache (tests, and right after an admin change through movie-api) */
+  forgetPromotions() {
+    this.promoCache = null;
   }
 
   /**
@@ -300,8 +364,13 @@ export class CatalogService {
     };
   }
 
-  private async summarize(c: DbCollection, now: Date): Promise<Series> {
+  private async summarize(
+    c: DbCollection,
+    now: Date,
+    promos: PromotionRow[],
+  ): Promise<Series> {
     const eps = episodes(c.items);
+    const promo = c.vip ? freePromotion(promos, c.id, now) : null;
     const [posterUrl, bannerUrl, verticalUrl] = await Promise.all([
       this.media.forBrowser(c.coverUrl),
       this.media.forBrowser(c.bannerUrl),
@@ -328,6 +397,8 @@ export class CatalogService {
       latestEpisodeAt: latestEpisodeAt(eps)?.toISOString() ?? null,
       nextEpisodeAt: nextEpisodeAt(c.items, now)?.toISOString() ?? null,
       featuredRank: c.featuredRank,
+      freeUntil: promo?.endsAt.toISOString() ?? null,
+      promoTitle: promo?.title ?? null,
     };
   }
 
@@ -336,9 +407,13 @@ export class CatalogService {
     e: Episode<DbVideo>,
     hasSubtitles: boolean,
     access: Access | null,
+    previewSeconds: number,
+    dubUrl: string | null,
   ): Promise<EpisodeView> {
     const v = e.video;
     const locked = closed(c, e.number, access);
+    const teaser =
+      locked && previewSeconds > 0 && e.number === c.freeEpisodes + 1;
     return {
       number: e.number,
       videoId: Number(v.id),
@@ -350,7 +425,33 @@ export class CatalogService {
       videoUrl: locked ? null : await this.media.forBrowser(v.videoUrl),
       subtitlesUrl:
         !locked && hasSubtitles ? `/episodes/${v.id}/subtitles.vtt` : null,
+      preview: teaser
+        ? {
+            url: (await this.media.forBrowser(v.videoUrl))!,
+            seconds: previewSeconds,
+          }
+        : null,
+      dubUrl: locked || !dubUrl ? null : await this.media.forBrowser(dubUrl),
     };
+  }
+
+  /** Each video's Khmer voice-over track, when it has one */
+  private async dubsFor(videoIds: bigint[]): Promise<Map<bigint, string>> {
+    if (!videoIds.length) return new Map();
+    const rows = await this.prisma.videoDub.findMany({
+      where: { videoId: { in: videoIds }, language: SITE_LANGUAGE },
+      select: { videoId: true, audioUrl: true },
+    });
+    return new Map(rows.map((r) => [r.videoId, r.audioUrl]));
+  }
+
+  /** Settings › previewSeconds (see EpisodeView.preview) */
+  private async previewSeconds(): Promise<number> {
+    const row = await this.prisma.appSetting.findUnique({
+      where: { section: 'streaming' },
+      select: { valueJson: true },
+    });
+    return pricesFrom(row?.valueJson).previewSeconds;
   }
 
   /**
@@ -386,6 +487,8 @@ export interface Access {
   vip: boolean;
   /** Bought the whole series */
   series: boolean;
+  /** A promotion makes the series free for everyone right now */
+  free: boolean;
   /** Episodes unlocked one by one with coins */
   episodes: Set<number>;
 }
@@ -397,6 +500,9 @@ export const closed = (
   access: Access | null,
 ) =>
   isLocked(c, n) &&
-  !(access && (access.vip || access.series || access.episodes.has(n)));
+  !(
+    access &&
+    (access.vip || access.series || access.free || access.episodes.has(n))
+  );
 
 const notFound = () => new NotFoundException('Series or episode not found');

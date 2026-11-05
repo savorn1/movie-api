@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -13,6 +14,8 @@ export class CommentDto {
   @IsInt() @Min(1) seriesId!: number;
   @IsInt() @Min(1) episode!: number;
   @IsString() @MinLength(1) @MaxLength(500) body!: string;
+  /** Seconds into the episode, when written while watching (floats over the video) */
+  @IsOptional() @IsInt() @Min(0) @Max(86_400) atSeconds?: number;
 }
 
 /** A browser's Web Push subscription (PushSubscription.toJSON()) */
@@ -30,4 +33,9 @@ export class PushEndpointDto {
 export class PushFollowDto extends PushEndpointDto {
   @IsInt() @Min(1) seriesId!: number;
   @IsBoolean() follow!: boolean;
+}
+
+export class CommentLikeDto {
+  @IsBoolean()
+  like!: boolean;
 }

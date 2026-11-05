@@ -13,6 +13,12 @@ export interface Prices {
   episodeCoins: number;
   /** Coins for the daily check-in (day 7 of a streak pays double) */
   checkInCoins: number;
+  /** Extra coins, in percent, on a viewer's first coin pack; 0 = off */
+  firstTopUpBonusPercent: number;
+  /** Seconds of the first VIP episode anyone may watch before paying; 0 = no previews */
+  previewSeconds: number;
+  /** VIP episodes a viewer may unlock a day by watching a sponsor ad; 0 = off */
+  adUnlocksPerDay: number;
 }
 
 export const DEFAULT_PRICES: Prices = {
@@ -30,6 +36,9 @@ export const DEFAULT_PRICES: Prices = {
   ],
   episodeCoins: 20,
   checkInCoins: 5,
+  firstTopUpBonusPercent: 50,
+  previewSeconds: 45,
+  adUnlocksPerDay: 3,
 };
 
 const PACK_FIELDS = {
@@ -41,6 +50,19 @@ const PACK_FIELDS = {
 const whole = (value: unknown, fallback: number, max: number) => {
   const n = typeof value === 'string' ? Number(value) : value;
   return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= max
+    ? n
+    : fallback;
+};
+
+/** A whole number in [min, max], else the fallback (0 is allowed when min is 0) */
+const between = (
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+) => {
+  const n = typeof value === 'string' && value.trim() ? Number(value) : value;
+  return typeof n === 'number' && Number.isInteger(n) && n >= min && n <= max
     ? n
     : fallback;
 };
@@ -91,6 +113,24 @@ export function pricesFrom(valueJson: string | null | undefined): Prices {
       stored.dailyCheckInCoins,
       DEFAULT_PRICES.checkInCoins,
       1_000,
+    ),
+    firstTopUpBonusPercent: between(
+      stored.firstTopUpBonusPercent,
+      DEFAULT_PRICES.firstTopUpBonusPercent,
+      0,
+      200,
+    ),
+    previewSeconds: between(
+      stored.previewSeconds,
+      DEFAULT_PRICES.previewSeconds,
+      0,
+      180,
+    ),
+    adUnlocksPerDay: between(
+      stored.adUnlocksPerDay,
+      DEFAULT_PRICES.adUnlocksPerDay,
+      0,
+      20,
     ),
   };
 }

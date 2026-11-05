@@ -91,3 +91,7 @@ export function billNumber(now = Date.now(), random = Math.random): string {
     .padStart(4, '0');
   return `RF-${now.toString(36).toUpperCase()}-${r}`;
 }
+
+/** Extra coins on a viewer's first coin pack: `percent` of the pack, rounded down */
+export const topUpBonus = (coins: number, percent: number) =>
+  percent > 0 ? Math.floor((coins * percent) / 100) : 0;

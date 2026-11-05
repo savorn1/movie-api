@@ -40,4 +40,17 @@ describe('pricesFrom', () => {
     expect(p.episodeCoins).toBe(30);
     expect(p.checkInCoins).toBe(5);
   });
+
+  it('reads the bonus and preview settings, where 0 turns them off', () => {
+    const off = pricesFrom(
+      JSON.stringify({ firstTopUpBonusPercent: 0, previewSeconds: '0' }),
+    );
+    expect(off.firstTopUpBonusPercent).toBe(0);
+    expect(off.previewSeconds).toBe(0);
+    const bad = pricesFrom(
+      JSON.stringify({ firstTopUpBonusPercent: 500, previewSeconds: 2.5 }),
+    );
+    expect(bad.firstTopUpBonusPercent).toBe(50);
+    expect(bad.previewSeconds).toBe(45);
+  });
 });

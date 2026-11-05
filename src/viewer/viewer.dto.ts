@@ -16,7 +16,8 @@ class EpisodeRef {
 }
 
 export class PlayDto extends EpisodeRef {
-  @IsIn(['START', 'COMPLETE']) event!: 'START' | 'COMPLETE';
+  /** WALL: the unlock screen was shown for this episode (paywall analytics) */
+  @IsIn(['START', 'COMPLETE', 'WALL']) event!: 'START' | 'COMPLETE' | 'WALL';
 }
 
 /** vote: 1 = 👍, -1 = 👎, 0 = cleared; previous: the viewer's vote before this one */

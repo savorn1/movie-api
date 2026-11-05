@@ -15,6 +15,10 @@ import { CommerceController } from './commerce/commerce.controller';
 import { CommerceService } from './commerce/commerce.service';
 import { EngagementController } from './engagement/engagement.controller';
 import { EngagementService } from './engagement/engagement.service';
+import { GrowthController } from './growth/growth.controller';
+import { GrowthService } from './growth/growth.service';
+import { MarketingController } from './marketing/marketing.controller';
+import { MarketingService } from './marketing/marketing.service';
 
 @Module({
   imports: [CoreModule, MediaModule],
@@ -25,6 +29,8 @@ import { EngagementService } from './engagement/engagement.service';
     ViewersController,
     CommerceController,
     EngagementController,
+    GrowthController,
+    MarketingController,
     HealthController,
   ],
   providers: [
@@ -34,6 +40,8 @@ import { EngagementService } from './engagement/engagement.service';
     ViewersService,
     CommerceService,
     EngagementService,
+    GrowthService,
+    MarketingService,
   ],
 })
 export class AppModule {}

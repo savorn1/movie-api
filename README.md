@@ -48,7 +48,7 @@ On RuengFlix, set `NUXT_MOVIE_API_BASE=http://localhost:3020` and `NUXT_MOVIE_AP
 | `GET /series/:id/followers`, `GET /chats/:chatId/follows`, `DELETE /chats/:chatId/follows` | Who follows a series, what a chat follows, stop a chat's alerts |
 | `POST /series/:id/alerts` | `{ alert, episodes }`. `alert` is true exactly once per new episode count, however many RuengFlix instances ask. |
 | `POST /series/:id/alerts/log` | `{ episode, source: "AUTO" \| "MANUAL", followers, sent, removed, failed }`: records an alert RuengFlix sent |
-| `GET /site` | `{ prices }`: the prices set in videolingo-web (Streaming › Prices), or the defaults |
+| `GET /site` | `{ prices, homeRows }`: the prices set in videolingo-web (Streaming › Prices), or the defaults, and the active home page rows in order (RuengFlix › Home rows; empty means RuengFlix shows its built-in rows) |
 | `POST /viewers`, `POST /viewers/login`, `POST /viewers/identity`, `GET /viewers/:id`, `PUT /viewers/:id/password`, `GET`/`PUT /viewers/:id/library` | Viewer accounts and their synced library; see docs.md › Viewer accounts |
 | `GET /viewers/:id/wallet`, `POST /viewers/:id/check-in`, `POST /viewers/:id/unlocks`, `GET /viewers/:id/coins` | Coins and VIP time; the daily check-in; unlocking one VIP episode with coins |
 | `POST /viewers/:id/orders`, `GET /viewers/:id/orders[/:orderId]` | KHQR payments for coins, a series or VIP. Getting a pending order asks Bakong whether it was paid. |

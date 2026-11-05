@@ -105,6 +105,8 @@ model EpisodeStats {
   completes    BigInt
   likes        BigInt
   dislikes     BigInt
+  /// Times the unlock screen was shown for this episode (V24)
+  wallViews    BigInt @default(0) @map("wall_views")
 
   @@id([collectionId, episode])
   @@map("streaming_episode_stats")
@@ -185,6 +187,8 @@ model Viewer {
   sessionVersion Int            @default(0) @map("session_version")
   createdAt      DateTime       @map("created_at") @db.Timestamp(6)
   lastLoginAt    DateTime?      @map("last_login_at") @db.Timestamp(6)
+  /// Invite-a-friend code, made on first use (V23)
+  inviteCode     String?        @unique @map("invite_code")
   library        ViewerLibrary?
 
   @@map("streaming_viewers")
@@ -207,6 +211,8 @@ model Wallet {
   coins     Int       @default(0)
   vipUntil  DateTime? @map("vip_until") @db.Timestamp(6)
   updatedAt DateTime  @map("updated_at") @db.Timestamp(6)
+  /// The vip_until a "VIP ends soon" reminder was sent for
+  vipRemindedFor DateTime? @map("vip_reminded_for") @db.Timestamp(6)
 
   @@map("streaming_wallets")
 }
@@ -240,6 +246,17 @@ model Order {
   paidBy       String?   @map("paid_by")
   bakongHash   String?   @map("bakong_hash")
   note         String?
+  /// First top-up bonus added on top of a coin pack
+  bonusCoins   Int?      @map("bonus_coins")
+  /// The viewer saw the "payment went through" notice
+  seenAt       DateTime? @map("seen_at") @db.Timestamp(6)
+  refundedAt   DateTime? @map("refunded_at") @db.Timestamp(6)
+  refundedBy   String?   @map("refunded_by")
+  refundReason String?   @map("refund_reason")
+  /// Extra coins from a running promotion (V24)
+  promoCoins   Int?      @map("promo_coins")
+  /// Bought for someone else: paying it makes a gift code (V24)
+  gift         Boolean   @default(false)
 
   @@map("streaming_orders")
 }
@@ -271,14 +288,86 @@ model Comment {
   id           BigInt    @id @default(autoincrement())
   collectionId BigInt    @map("collection_id")
   episode      Int
-  viewerId     BigInt    @map("viewer_id")
+  /// Null for official replies written in the admin portal
+  viewerId     BigInt?   @map("viewer_id")
   body         String
   createdAt    DateTime  @map("created_at") @db.Timestamp(6)
   reportCount  Int       @default(0) @map("report_count")
   hiddenAt     DateTime? @map("hidden_at") @db.Timestamp(6)
   hiddenBy     String?   @map("hidden_by")
+  likeCount    Int       @default(0) @map("like_count")
+  pinnedAt     DateTime? @map("pinned_at") @db.Timestamp(6)
+  pinnedBy     String?   @map("pinned_by")
+  /// A reply (official replies from RuengFlix) under this comment
+  parentId     BigInt?   @map("parent_id")
+  /// The admin who wrote an official reply
+  authorAdmin  String?   @map("author_admin")
+  /// Seconds into the episode when it was written while watching (floats over the video) (V24)
+  atSeconds    Int?      @map("at_seconds")
 
   @@map("streaming_comments")
+}
+
+/// An episode a signed-in viewer finished on a given local day
+model ViewerWatch {
+  viewerId     BigInt   @map("viewer_id")
+  day          DateTime @db.Date
+  collectionId BigInt   @map("collection_id")
+  episode      Int
+  createdAt    DateTime @map("created_at") @db.Timestamp(6)
+
+  @@id([viewerId, day, collectionId, episode])
+  @@map("streaming_viewer_watches")
+}
+
+model MissionClaim {
+  viewerId  BigInt   @map("viewer_id")
+  day       DateTime @db.Date
+  mission   String
+  coins     Int
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+
+  @@id([viewerId, day, mission])
+  @@map("streaming_mission_claims")
+}
+
+model Referral {
+  inviteeId  BigInt    @id @map("invitee_id")
+  inviterId  BigInt    @map("inviter_id")
+  createdAt  DateTime  @map("created_at") @db.Timestamp(6)
+  rewardedAt DateTime? @map("rewarded_at") @db.Timestamp(6)
+
+  @@map("streaming_referrals")
+}
+
+model EpisodeReaction {
+  collectionId BigInt @map("collection_id")
+  episode      Int
+  /// Seconds / 5
+  bucket       Int
+  kind         String
+  count        Int    @default(0)
+
+  @@id([collectionId, episode, bucket, kind])
+  @@map("streaming_episode_reactions")
+}
+
+model SearchTerm {
+  term  String
+  day   DateTime @db.Date
+  count Int      @default(0)
+
+  @@id([term, day])
+  @@map("streaming_search_terms")
+}
+
+model CommentLike {
+  commentId BigInt   @map("comment_id")
+  viewerId  BigInt   @map("viewer_id")
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+
+  @@id([commentId, viewerId])
+  @@map("streaming_comment_likes")
 }
 
 model CommentReport {
@@ -315,4 +404,127 @@ model ViewerDay {
 
   @@id([viewerId, day])
   @@map("streaming_viewer_days")
+}
+
+// ---------- V24: ads, promotions, gifts, reminders, clips; dub tracks read from VideoLingo ----------
+
+model Ad {
+  id        BigInt   @id @default(autoincrement())
+  title     String
+  videoUrl  String   @map("video_url")
+  clickUrl  String?  @map("click_url")
+  seconds   Int
+  active    Boolean
+  weight    Int
+  createdBy String?  @map("created_by")
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+  updatedAt DateTime @map("updated_at") @db.Timestamp(6)
+
+  @@map("streaming_ads")
+}
+
+/// RuengFlix's home page rows, in order (VideoLingo V25)
+model HomeRow {
+  id        BigInt   @id @default(autoincrement())
+  title     String
+  source    String
+  value     String?
+  maxItems  Int      @map("max_items")
+  position  Int
+  active    Boolean
+  createdBy String?  @map("created_by")
+  createdAt DateTime @map("created_at") @db.Timestamp(6)
+  updatedAt DateTime @map("updated_at") @db.Timestamp(6)
+
+  @@map("streaming_home_rows")
+}
+
+model AdView {
+  id           BigInt    @id @default(autoincrement())
+  adId         BigInt?   @map("ad_id")
+  viewerId     BigInt    @map("viewer_id")
+  collectionId BigInt    @map("collection_id")
+  episode      Int
+  day          DateTime  @db.Date
+  startedAt    DateTime  @map("started_at") @db.Timestamp(6)
+  completedAt  DateTime? @map("completed_at") @db.Timestamp(6)
+
+  @@map("streaming_ad_views")
+}
+
+model Promotion {
+  id           BigInt   @id @default(autoincrement())
+  /// FREE_SERIES or COIN_BONUS
+  kind         String
+  title        String
+  collectionId BigInt?  @map("collection_id")
+  bonusPercent Int?     @map("bonus_percent")
+  startsAt     DateTime @map("starts_at") @db.Timestamp(6)
+  endsAt       DateTime @map("ends_at") @db.Timestamp(6)
+  createdBy    String?  @map("created_by")
+  createdAt    DateTime @map("created_at") @db.Timestamp(6)
+
+  @@map("streaming_promotions")
+}
+
+model Gift {
+  id         BigInt    @id @default(autoincrement())
+  code       String    @unique
+  orderId    BigInt    @unique @map("order_id")
+  giverId    BigInt?   @map("giver_id")
+  /// COINS or VIP
+  kind       String
+  coins      Int?
+  months     Int?
+  message    String?
+  createdAt  DateTime  @map("created_at") @db.Timestamp(6)
+  redeemedBy BigInt?   @map("redeemed_by")
+  redeemedAt DateTime? @map("redeemed_at") @db.Timestamp(6)
+  voidedAt   DateTime? @map("voided_at") @db.Timestamp(6)
+
+  @@map("streaming_gifts")
+}
+
+model ResumeReminder {
+  viewerId     BigInt   @map("viewer_id")
+  collectionId BigInt   @map("collection_id")
+  episode      Int
+  sentAt       DateTime @map("sent_at") @db.Timestamp(6)
+
+  @@id([viewerId, collectionId, episode])
+  @@map("streaming_resume_reminders")
+}
+
+model Clip {
+  id           BigInt    @id @default(autoincrement())
+  code         String    @unique
+  collectionId BigInt    @map("collection_id")
+  episode      Int
+  videoId      BigInt    @map("video_id")
+  startSeconds Int       @map("start_seconds")
+  seconds      Int
+  viewerId     BigInt?   @map("viewer_id")
+  /// PENDING, WORKING, READY or FAILED (VideoLingo's ClipWorker cuts it)
+  status       String
+  url          String?
+  storageKey   String?   @map("storage_key")
+  posterUrl    String?   @map("poster_url")
+  error        String?
+  views        Int       @default(0)
+  createdAt    DateTime  @map("created_at") @db.Timestamp(6)
+  finishedAt   DateTime? @map("finished_at") @db.Timestamp(6)
+
+  @@map("streaming_clips")
+}
+
+/// A finished voice-over track of a video (made or uploaded in VideoLingo); read only here
+model VideoDub {
+  id         BigInt  @id
+  videoId    BigInt  @map("video_id")
+  language   String
+  audioUrl   String  @map("audio_url")
+  mimeType   String? @map("mime_type")
+  durationMs BigInt  @map("duration_ms")
+
+  @@map("video_dubs")
 }

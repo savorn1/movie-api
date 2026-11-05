@@ -13,6 +13,7 @@ import {
 import { EngagementService } from './engagement.service';
 import {
   CommentDto,
+  CommentLikeDto,
   PushEndpointDto,
   PushFollowDto,
   PushSubscriptionDto,
@@ -31,6 +32,19 @@ export class EngagementController {
     return this.engagement.comments(id, ep, viewer);
   }
 
+  @Get('series/:id/episodes/:ep/timed-comments')
+  timed(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('ep', ParseIntPipe) ep: number,
+  ) {
+    return this.engagement.timedComments(id, ep);
+  }
+
+  @Get('viewers/:id/fan')
+  fan(@Param('id', ParseIntPipe) id: number) {
+    return this.engagement.fan(id);
+  }
+
   @Post('viewers/:id/comments')
   addComment(@Param('id', ParseIntPipe) id: number, @Body() body: CommentDto) {
     return this.engagement.addComment(id, body);
@@ -43,6 +57,15 @@ export class EngagementController {
     @Param('commentId', ParseIntPipe) commentId: number,
   ) {
     return this.engagement.deleteComment(id, commentId);
+  }
+
+  @Put('viewers/:id/comments/:commentId/like')
+  likeComment(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('commentId', ParseIntPipe) commentId: number,
+    @Body() body: CommentLikeDto,
+  ) {
+    return this.engagement.likeComment(id, commentId, body.like);
   }
 
   @Post('viewers/:id/comments/:commentId/report')

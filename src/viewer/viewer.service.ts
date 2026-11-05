@@ -55,7 +55,12 @@ export class ViewerService {
 
   async recordPlay({ seriesId, episode, event }: PlayDto) {
     await this.requireEpisode(seriesId, episode);
-    const field = event === 'START' ? 'starts' : 'completes';
+    const field =
+      event === 'START'
+        ? 'starts'
+        : event === 'WALL'
+          ? 'wallViews'
+          : 'completes';
     await this.prisma.episodeStats.upsert({
       where: {
         collectionId_episode: { collectionId: BigInt(seriesId), episode },
